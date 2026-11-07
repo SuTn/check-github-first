@@ -1,0 +1,31 @@
+{
+  "name": "check-github-first",
+  "version": "1.0.0",
+  "description": "开发前探查 GitHub 的 skill：输入一个开发想法（中文随意），输出多通道检索的候选项目卡片与借鉴卡——动手造轮子之前，先看看有没有人已经做过。",
+  "bin": {
+    "check-github-first": "scout.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "scout": "node scout.mjs",
+    "check": "node --check scout.mjs && node --check src/net.mjs && node --check src/transport.mjs && node --check src/plan.mjs && node --check src/lexicon.mjs && node --check src/card.mjs && node --check src/inspect.mjs"
+  },
+    "keywords": [
+    "github",
+    "prior-art",
+    "search",
+    "open-source",
+    "agent-skill",
+    "mcp",
+    "cli",
+    "chinese"
+  ],
+  "author": "SuTn",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "undici": "^8.12.4"
+  }
+}
