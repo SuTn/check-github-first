@@ -12,9 +12,9 @@
     "scout": "node scout.mjs",
     "check": "node --check scout.mjs && node --check src/net.mjs && node --check src/transport.mjs && node --check src/plan.mjs && node --check src/lexicon.mjs && node --check src/card.mjs && node --check src/inspect.mjs"
   },
-    "keywords": [
+  "keywords": [
     "github",
-    "prior-art",
+    "prior-art-search",
     "search",
     "open-source",
     "agent-skill",
