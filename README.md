@@ -1,5 +1,9 @@
 # check-github-first
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520-green.svg)](package.json)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/SuTn/check-github-first/pulls)
+
 > **动手造轮子之前，先看看有没有人已经做过。**
 > **Before building the wheel, check whether someone already built it.**
 
