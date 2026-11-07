@@ -1,6 +1,13 @@
 # check-github-first
 
 > **动手造轮子之前，先看看有没有人已经做过。**
+> **Before building the wheel, check whether someone already built it.**
+
+[中文](#中文文档) · [English](#english)
+
+---
+
+## 中文文档
 
 开发前探查 GitHub 的 agent skill / CLI：输入一个开发想法（中文随意说），
 输出「该不该造、站在谁肩上、怎么借鉴」的决策依据——候选项目卡片
@@ -16,9 +23,9 @@ $ node scout.mjs "手机照片自动备份到家里NAS的工具，智能分类�
 | 4 | LibrePhotos/librephotos  | 8.1k  | Python     | 6.63 | A self-hosted open source photo management service…
 ```
 
-（↑ V 轮实测：教科书答案 Immich/PhotoPrism/LibrePhotos 全部命中）
+（↑ 实测：教科书答案 Immich/PhotoPrism/LibrePhotos 全部命中）
 
-## 为什么需要它
+### 为什么需要它
 
 GitHub 官方 MCP Server / REST API 提供的是**手脚**（原子工具），但缺一个**探查大脑**：
 
@@ -31,36 +38,55 @@ GitHub 官方 MCP Server / REST API 提供的是**手脚**（原子工具），�
 | 裸 fetch（企业网全超时） | 代理自动探测（env → Windows 注册表 → 直连），真实企业网验证通过 |
 | README 正文不索引 | readme 补召回（仅候选池 <10 时，带全量硬约束限定，实测不带限定是毒药） |
 
-## 安装
+### GITHUB_TOKEN 完全可选
 
-### 作为 agent skill（DSH / Claude 等）
+- **不设置** → 自动降级匿名 REST（api.github.com，10 搜索/分钟/IP，单次探查够用）
+- **设置** → 官方远程 MCP 端点（api.githubcopilot.com/mcp/），5000 请求/小时
+- token 只需 fine-grained PAT + public repo 只读：
+  github.com/settings/personal-access-tokens → Generate → Public repos read-only
+- 企业网/国内网络无需配置，脚本自动探测系统代理
 
-把本仓库克隆到 skill 目录：
+### 安装
+
+#### 方式一：让 agent 自己装（推荐）
+
+把仓库链接发给你的 agent，一句话即可，它会自己完成安装和验证：
+
+```
+把 https://github.com/SuTn/check-github-first 装到你的技能目录
+（clone → npm i，唯一依赖 undici）→ 用 node scout.mjs "quick check" --quick 冒烟验证
+→ 读一遍 SKILL.md，以后我提开发想法时按它的五步工作流帮我探查。
+```
+
+更省事的说法（agent 自己会看 README/SKILL.md 摸索出步骤）：
+
+```
+https://github.com/SuTn/check-github-first —— 装好这个 skill，
+然后帮我探查「本地优先的 Markdown 笔记应用，支持双向链接」
+```
+
+常见技能目录：DSH `~/.agents/skills/`、Claude Code `~/.claude/skills/`、
+其他 agent clone 到任意目录读 SKILL.md 即可。更新：`git pull`。
+
+#### 方式二：手动安装为 agent skill
 
 ```bash
 git clone https://github.com/SuTn/check-github-first.git ~/.agents/skills/check-github-first
 cd ~/.agents/skills/check-github-first && npm i
 ```
 
-agent 按 `SKILL.md` 里的五步工作流执行：需求分诊 → 检索 → 打分 → 深读 → 结论。
-
-### 作为独立 CLI（无 agent）
+#### 方式三：独立 CLI（无 agent）
 
 ```bash
 git clone https://github.com/SuTn/check-github-first.git
 cd check-github-first && npm i
-export GITHUB_TOKEN=github_pat_xxx   # 可选；无 token 自动降级匿名 REST
+export GITHUB_TOKEN=github_pat_xxx   # 可选，见上文
 node scout.mjs "本地优先的 Markdown 笔记应用，支持双向链接"
 ```
 
-- 依赖：Node ≥ 20，`undici`（唯一运行时依赖）
-- Token：fine-grained PAT，public repo 只读即可
-  （github.com/settings/personal-access-tokens → Generate → Public repos read-only）。
-  有 token 走官方远程 MCP 端点（api.githubcopilot.com/mcp/），
-  无 token 降级 REST api.github.com（10 搜索/分钟/IP）
-- 企业网/国内网络无需配置，脚本自动探测系统代理
+依赖：Node ≥ 20，`undici`（唯一运行时依赖）。
 
-## 用法
+### 用法
 
 ```bash
 # 探查：候选池卡片（stdout）+ 过程日志（stderr）
@@ -75,7 +101,7 @@ node scout.mjs --inspect immich-app/immich logseq/logseq
 node scout.mjs --probe grafana/loki
 ```
 
-## 五步流水线（SKILL.md 有完整 agent 指令）
+### 五步流水线（SKILL.md 有完整 agent 指令）
 
 1. **需求分诊**：三层拷问（找来用还是参考写？硬约束？锚点项目？）把想法
    变成检索参数——每个问题必须落地为一个检索变量，否则不问
@@ -89,7 +115,7 @@ node scout.mjs --probe grafana/loki
    `relevance × (1 + log10(max(stars,10)+1)) / 2`，两区物理隔离；
    深读每仓库 ≤3 请求输出借鉴卡
 
-## 诚实性纪律（不可违反）
+### 诚实性纪律（不可违反）
 
 1. **空结果 ≠ 不存在**——GitHub 搜索只匹配 name/description/topics，
    检索够不到就说「这条查询够不到」
@@ -97,7 +123,7 @@ node scout.mjs --probe grafana/loki
 3. **未测过的数字不写成 0**——失败通道显示「行数未知」
 4. **拒绝 > 垃圾**——没有英文检索词时宁可拒绝并教用户，不返回无关结果
 
-## 设计原则：CLI 与 agent 的分工
+### 设计原则：CLI 与 agent 的分工
 
 - **CLI 层只做**：执行、配额纪律、公式计算、信号传递（词典未命中的中文
   片段数、含知名产品专名等 → stderr 提示上层）
@@ -106,7 +132,7 @@ node scout.mjs --probe grafana/loki
   用例反复验证出的边界（V2：专名直通导致 top10 里 8 个是插件生态配件；
   V4：42 字 4 意图输入塌缩成单个歧义词 "nas"）
 
-## 测试记录
+### 测试记录
 
 ~38 个用例、24 项修复，全部在真实企业网 + 官方远程 MCP 端点下实测：
 
@@ -118,20 +144,7 @@ node scout.mjs --probe grafana/loki
 - ✅ 防御层：专名输入不再塌缩成生态配件清单（outline #1、doca #2）
 - ✅ monorepo 深读：plane（6171 项树 + apps/admin 栈）、memos（web 栈 + Go 入口）
 
-## 与 dsh-find-ideas 的关系
-
-查询规划 / 排序公式 / 诚实性原则借鉴自
-[tianyao2003/dsh-find-ideas](https://github.com/tianyao2003/dsh-find-ideas)
-（DSH 插件，13.4k 行 TypeScript，工程严谨度极高，强烈推荐读它的源码注释）。
-
-| | dsh-find-ideas | check-github-first |
-|---|---|---|
-| 传输 | 直连 REST（自管限流/重试） | 官方远程 MCP 端点（协议层官方维护），REST 降级 |
-| 代理 | 检测到只提示不解决 | 自动探测（env→Windows 注册表→直连） |
-| 形态 | DSH 插件（仅 DSH 可用） | 通用 skill（任何 agent + Node） |
-| 规模 | 13.4k 行，四工具全链路 | ~600 行，聚焦探查核心价值 |
-
-## 目录结构
+### 目录结构
 
 ```
 check-github-first/
@@ -147,6 +160,185 @@ check-github-first/
     └── inspect.mjs   # 深读：树 → 挑文件 → 借鉴卡
 ```
 
-## License
+### License
+
+MIT
+
+---
+
+## English
+
+An agent skill / CLI that scouts GitHub **before** you start building:
+describe your idea in any language (Chinese works out of the box) and get
+the decision inputs — a candidate-pool card (multi-channel search +
+formula ranking) and reference cards for the repos you pick
+(tech stack / architecture / direct source links).
+
+```
+$ node scout.mjs "a local-first markdown note app with bidirectional links"
+
+🎯 Candidate pool card
+| # | repo                    | stars | language   | rank | description |
+| 1 | siyuan-note/siyuan     | 36.6k | TypeScript | 7.6  | A privacy-first personal knowledge management software…
+| 2 | logseq/logseq          | 37.2k | ClojureScript | 7.6 | A privacy-first, open-source knowledge base…
+```
+
+### Why it exists
+
+The official GitHub MCP Server / REST API gives you **hands** (atomic
+tools) but not a **scouting brain**:
+
+| Hands layer (official API/MCP) | Brain layer (this skill) |
+|---|---|
+| A single `search_repositories` tool | Three-channel query planning: anchor (broad terms + stars, reaches domain leaders) / precise (long AND chain, literal matches) / tail (same query + updated sort — the two result sets are **disjoint**: when the stars-sorted page holds 0 repos under 100★, the updated-sorted page holds 28, reaching active small projects star-sorting never shows) |
+| Raw JSON | Candidate-pool card: pre-ranking formula + channel diversity seats (prevents star bias from drowning vertical projects) + honest boundary notes |
+| "Not found" is the end of the story | Known-project gap check: `--probe` reads a domain leader's topics as query seeds (field-tested: litemall 0 → #1) |
+| Non-English queries find nothing | Chinese→English search terms: LLM translation first, lexicon fallback, refuse-and-teach if both fail (top GitHub projects describe themselves in English) |
+| Bare fetch (corporate networks time out) | Proxy auto-detection (env → Windows registry → direct), verified on a real corporate network |
+| README bodies are not indexed | Readme recall (only when the pool <10, with every hard filter attached — field-tested: unqualified `in:readme` is poison) |
+
+### GITHUB_TOKEN is fully optional
+
+- **Not set** → automatic anonymous REST fallback (api.github.com, 10 searches/min/IP — enough for a single scouting run)
+- **Set** → official remote MCP endpoint (api.githubcopilot.com/mcp/), 5000 requests/hour
+- The token only needs to be a fine-grained PAT with public-repo read-only access:
+  github.com/settings/personal-access-tokens → Generate → Public repos read-only
+- Corporate networks need no configuration — the script auto-detects the system proxy
+
+### Install
+
+#### Option 1: let your agent install it (recommended)
+
+Just send the repo URL to your agent with one sentence — it will install
+and verify by itself:
+
+```
+Install https://github.com/SuTn/check-github-first into your skill directory
+(clone → npm i, undici is the only dependency) → smoke-test with
+node scout.mjs "quick check" --quick → read SKILL.md, then follow its
+five-step workflow whenever I bring up a build idea.
+```
+
+Or even shorter (the agent will figure out the steps from README/SKILL.md):
+
+```
+https://github.com/SuTn/check-github-first — install this skill,
+then scout "a local-first markdown note app with bidirectional links" for me.
+```
+
+Common skill directories: DSH `~/.agents/skills/`, Claude Code
+`~/.claude/skills/`; any other agent can clone it anywhere and read
+SKILL.md. To update: `git pull`.
+
+#### Option 2: install manually as an agent skill
+
+```bash
+git clone https://github.com/SuTn/check-github-first.git ~/.agents/skills/check-github-first
+cd ~/.agents/skills/check-github-first && npm i
+```
+
+#### Option 3: standalone CLI (no agent)
+
+```bash
+git clone https://github.com/SuTn/check-github-first.git
+cd check-github-first && npm i
+export GITHUB_TOKEN=github_pat_xxx   # optional, see above
+node scout.mjs "a local-first markdown note app with bidirectional links"
+```
+
+Requirements: Node ≥ 20, `undici` (the only runtime dependency).
+
+### Usage
+
+```bash
+# Scout: candidate-pool card (stdout) + process log (stderr)
+node scout.mjs "your idea" [--keywords "english terms"] [--lang typescript]
+                          [--license mit] [--min-stars 100] [--active]
+                          [--anchor owner/repo] [--quick]
+
+# Deep-read the shortlist: tree + manifest + README → reference card (≤3 requests per repo)
+node scout.mjs --inspect immich-app/immich logseq/logseq
+
+# Anchor probe: read a reference repo's topics as query seeds
+node scout.mjs --probe grafana/loki
+```
+
+### The five-step pipeline (full agent instructions in SKILL.md)
+
+1. **Requirement triage**: three rounds of questions (use as-is or as a
+   reference? hard constraints? anchor project?) that turn the idea into
+   search parameters — every question must map to a search variable, or it is not asked
+2. **Language processing**: Chinese ideas → English search terms (LLM
+   translation first, a ~75-entry lexicon as fallback). Keyword order =
+   channel weight: the first 2 terms feed anchor, the first 4 feed
+   precise. Proper nouns are anchors, not search terms ("like Obsidian" →
+   knowledge base); multi-intent ideas are split first
+3. **Query planning**: three channels + two adaptive recalls (pool <10 →
+   readme recall; precise returns 0 rows → a fallback search on the
+   chain's tail terms, so tail intents don't die with the channel)
+4. **Execution**: a 3-searches-per-idea quota discipline, one automatic
+   retry on transient failures, full stop on 429
+5. **Scoring & deep-read**: the LLM assigns relevance (0-10) with
+   reasons; code computes `relevance × (1 + log10(max(stars,10)+1)) / 2`;
+   the two zones stay physically separated. Deep-read costs ≤3 requests
+   per repo and emits a reference card
+
+### Honesty rules (non-negotiable)
+
+1. **An empty result ≠ nonexistence** — GitHub search only matches
+   name/description/topics; if a query can't reach it, say exactly that
+2. **Formula scores are never LLM-assigned** — relevance is judgment
+   (fallible); final is computed (reproducible)
+3. **Untested numbers are never written as 0** — failed channels show
+   "row count unknown"
+4. **Refuse over garbage** — with no English search terms, refuse and
+   teach the user instead of returning irrelevant results
+
+### Design principle: division of labor between CLI and agent
+
+- **The CLI only does**: execution, quota discipline, formula math, and
+  signal passing (untranslated Chinese fragments, known product proper
+  nouns, … → stderr hints for the upper layer)
+- **Semantic judgment belongs to the agent**: whether a proper noun is
+  the target platform or a reference, how to split multi-intent input,
+  how to translate concepts — lexicons/blocklists can never cover world
+  knowledge. This boundary was hammered out over ~38 test cases
+  (V2: passing a proper noun through turned the top-10 into 8
+  ecosystem add-ons; V4: a 42-character four-intent input collapsed
+  into a single ambiguous token "nas")
+
+### Test record
+
+~38 cases and 24 fixes, all field-tested on a real corporate network
+through the official remote MCP endpoint:
+
+- ✅ Chinese idea, full pipeline: "local-first markdown notes +
+  bidirectional links" → siyuan/logseq/note-gen/MiaoYan/reor/TriliumNext all hit
+- ✅ Anchor probe: probing litemall's topics took it from 0 → #1; miniflux → #3
+- ✅ Double-run determinism: same args 10s apart, 33-line cards
+  byte-identical (including the internal order of tied scores)
+- ✅ Multi-intent split (after the SKILL.md rules): Immich #1 / PhotoPrism #2 / LibrePhotos #4
+- ✅ Defensive layers: proper-noun input no longer collapses into an
+  ecosystem-parts list (outline #1, doca #2)
+- ✅ Monorepo deep-read: plane (6171-item tree + apps/admin stack),
+  memos (web stack + Go entry)
+
+### Repository layout
+
+```
+check-github-first/
+├── SKILL.md          # agent instructions: five-step workflow + honesty rules
+├── scout.mjs         # CLI entry: scout / deep-read / anchor probe
+├── package.json
+└── src/
+    ├── net.mjs       # proxy detection (env→registry→direct) + endpoint selection
+    ├── transport.mjs # MCP (official remote) / REST dual implementation
+    ├── plan.mjs      # three-channel planning + recall queries
+    ├── lexicon.mjs   # zh→en lexicon (fallback) + proper-noun hint table
+    ├── card.mjs      # candidate-pool card (pre-ranking + seats + boundary notes)
+    └── inspect.mjs   # deep-read: tree → pick files → reference card
+```
+
+### License
 
 MIT
