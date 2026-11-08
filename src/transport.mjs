@@ -1,21 +1,26 @@
 // transport.mjs — 传输层：把"搜仓库/读文件/读树"统一抽象，MCP 与 REST 双实现
 //
-// MCP 模式：官方远程端点 https://api.githubcopilot.com/mcp/
+// MCP 模式（需 token）：官方远程端点 https://api.githubcopilot.com/mcp/
 //   - 协议：MCP Streamable HTTP（POST JSON-RPC，响应可能是 SSE 流）
-//   - 工具：search_repositories / get_file_contents / get_repository_tree
+//   - 用途：search_repositories；get_file_contents 作 REST 失败时的兜底
 // REST 模式：api.github.com（匿名或同一 token）
 //   - 匿名搜索限 10 次/分钟/IP；带 token 30 次/分钟
+//   - 树/文件/元数据统一走 REST：字段更全（topics/pushed_at），配额更宽
 //
 // 统一出口（供规划器调用）：
-//   searchRepos(query, sort, limit) -> [{full_name, stars, pushed_at, description, language, url, topics}]
-//   getTree(owner, repo, ref)      -> [{path, type}]（截断时标记）
-//   getFile(owner, repo, path, ref)-> {text, ok, truncated}
+//   searchRepos(query, sort, limit) -> [{full_name, stars, pushed_at, description, language, url, topics, matchTier}]
+//   getTree(owner, repo)            -> [{path, type}] + .truncated / .requests
+//   getFile(owner, repo, path, ref) -> {text, ok, truncated}
+//   getRepoMeta(owner, repo)        -> {full_name, description, topics, ...}
 
+import { readFileSync } from 'node:fs'
 import { netFetch, selectEndpoint, EndpointState } from './net.mjs'
 
 const MCP_URL = 'https://api.githubcopilot.com/mcp/'
 const API = 'https://api.github.com'
-const UA = 'check-github-first/0.1 (prototype)'
+
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+const UA = `check-github-first/${pkg.version}`
 
 // ---------------------------------------------------------------------------
 // MCP Streamable HTTP 客户端（最小实现：initialize → tools/call）
@@ -38,7 +43,17 @@ async function mcpCall(method, params, token) {
   })
   const sid = res.headers.get('mcp-session-id')
   if (sid) mcpSessionId = sid
-  if (!res.ok) throw new Error(`MCP ${method} HTTP ${res.status}`)
+  if (!res.ok) {
+    // 429 必须带 rateLimited 标记：scout 靠它决定"立即停止后续搜索"
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('retry-after') || '60')
+      throw Object.assign(new Error(`MCP 限流（HTTP 429），retry-after ${retryAfter}s`), {
+        rateLimited: true,
+        retryAfter,
+      })
+    }
+    throw new Error(`MCP ${method} HTTP ${res.status}`)
+  }
   // 响应可能是 JSON，也可能是 SSE
   const ctype = res.headers.get('content-type') || ''
   let payload
@@ -58,7 +73,7 @@ async function ensureMcp(token) {
   await mcpCall('initialize', {
     protocolVersion: '2025-06-18',
     capabilities: {},
-    clientInfo: { name: 'check-github-first', version: '0.1.0' },
+    clientInfo: { name: 'check-github-first', version: pkg.version },
   }, token)
   // notifications/initialized（无 id，服务器不回复）
   const headers = {
@@ -102,24 +117,83 @@ async function mcpTool(name, args, token) {
 // REST 实现
 // ---------------------------------------------------------------------------
 
-async function restFetch(path, token, accept) {
+function parseJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+async function restFetch(path, token) {
   const headers = {
     'User-Agent': UA,
-    'Accept': accept || 'application/vnd.github+json',
+    'Accept': 'application/vnd.github+json',
   }
   if (token) headers['Authorization'] = `Bearer ${token}`
   const res = await netFetch(`${API}${path}`, { headers })
+  const text = await res.text()
+
   if (res.status === 403 || res.status === 429) {
-    const retryAfter = Number(res.headers.get('retry-after') || '60')
-    throw Object.assign(new Error(`REST rate limited (HTTP ${res.status})，retry-after ${retryAfter}s`), { rateLimited: true, retryAfter })
+    const body = parseJson(text)
+    const remaining = res.headers.get('x-ratelimit-remaining')
+    const rateLimited = res.status === 429 || remaining === '0' || /rate limit/i.test(body?.message || '')
+    if (rateLimited) {
+      const retryAfter = Number(res.headers.get('retry-after') || '60')
+      throw Object.assign(new Error(`REST 限流（HTTP ${res.status}），retry-after ${retryAfter}s`), {
+        rateLimited: true,
+        retryAfter,
+      })
+    }
+    // 403 不一定是限流：大文件 contents API 会以 403 + message 返回
+    throw new Error(`REST ${path} HTTP 403: ${(body?.message || text.slice(0, 120)).trim()}`)
   }
   if (!res.ok) throw new Error(`REST ${path} HTTP ${res.status}`)
-  return res.json()
+  if (!text) return null
+  const data = parseJson(text)
+  if (data === null) throw new Error(`REST ${path} 返回非 JSON 响应（${text.slice(0, 80)}）`)
+  return data
 }
 
 // ---------------------------------------------------------------------------
 // 统一出口
 // ---------------------------------------------------------------------------
+
+/** 不是语义匹配词的 qualifier：过滤器/范围限定，不能进 matchTier 打分。
+ *  （旧实现把 license:mit → "mit"、language:typescript → "typescript" 一起
+ *  塞进词位判断——仓库描述里含 "commit" 就因 "mit" 拿到 tier 加成。） */
+const NON_SEMANTIC_QUALIFIERS = new Set([
+  'language', 'license', 'stars', 'pushed', 'created', 'updated', 'size',
+  'followers', 'forks', 'fork', 'archived', 'in', 'user', 'org', 'repo',
+  'is', 'mirror', 'template', 'good-first-issues', 'help-wanted-issues',
+])
+
+/**
+ * 从查询串提取词位分级用的语义词：裸词 + topic:/topics: 的值；
+ * 其它 qualifier（language/license/stars/pushed/...）一律丢弃。
+ */
+export function extractQueryTerms(query) {
+  const out = []
+  for (const raw of String(query || '').toLowerCase().split(/\s+/)) {
+    if (!raw) continue
+    if (raw.includes(':')) {
+      const idx = raw.indexOf(':')
+      const key = raw.slice(0, idx)
+      const value = raw.slice(idx + 1)
+      if (!value || value.startsWith('>') || value.startsWith('<')) continue
+      if (key === 'topic' || key === 'topics') {
+        out.push(value.replace(/[^a-z0-9-]/g, ''))
+      } else if (NON_SEMANTIC_QUALIFIERS.has(key)) {
+        continue
+      } else {
+        out.push(value.replace(/[^a-z0-9-]/g, ''))
+      }
+      continue
+    }
+    out.push(raw.replace(/[^a-z0-9-]/g, ''))
+  }
+  return [...new Set(out.filter((w) => w.length >= 3))]
+}
 
 function repoRow(item, queryTerms = []) {
   const topics = item.topics || []
@@ -144,11 +218,11 @@ function repoRow(item, queryTerms = []) {
 /**
  * 词位分级：3 = 检索词命中 topics；2 = 命中 name；1 = 仅 description；0 = 无词面命中。
  */
-function matchTierOf(fullName, description, topics, queryTerms) {
-  if (!queryTerms.length) return 0
-  const name = fullName.toLowerCase()
-  const desc = description.toLowerCase()
-  const topicStr = topics.join(' ').toLowerCase()
+export function matchTierOf(fullName, description, topics, queryTerms) {
+  if (!queryTerms || queryTerms.length === 0) return 0
+  const name = String(fullName || '').toLowerCase()
+  const desc = String(description || '').toLowerCase()
+  const topicStr = (topics || []).join(' ').toLowerCase()
   for (const t of queryTerms) {
     if (topicStr.includes(t)) return 3
   }
@@ -163,26 +237,11 @@ function matchTierOf(fullName, description, topics, queryTerms) {
 
 /**
  * 搜仓库。query 支持 GitHub 高级语法；sort: 'stars'|'updated'|'best'。
- * queryTerms：检索词（用于词位分级），从 query 里剥出纯词。
+ * queryTerms：检索词（用于词位分级），从 query 里剥出纯语义词。
  */
 export async function searchRepos(query, sort = 'stars', limit = 30) {
   const { mode, token } = selectEndpoint()
-  // 词位分级的检索词提取（R2 教训）：qualifier（topic:boards、language:go、
-  // stars:>100）的"值"才是匹配词——旧版把整个 token 剥冒号后变成
-  // "topicboards" 这种无意义串，导致 topic: 查询的行 matchTier 全为 0
-  // 被误罚 ×0.75（openproject 三通道命中却继承 anchor 行的 tier=0 跌出主区）。
-  const queryTerms = query.toLowerCase()
-    .split(/\s+/)
-    .flatMap((w) => {
-      if (w.includes(':')) {
-        const v = (w.split(':')[1] || '')
-        // stars:>100 / pushed:>2026-xx 这类范围值不是匹配词
-        if (v.startsWith('>') || v.startsWith('<')) return []
-        return [v.replace(/[^a-z0-9-]/g, '')]
-      }
-      return [w.replace(/[^a-z0-9-]/g, '')]
-    })
-    .filter((w) => w.length >= 3)
+  const queryTerms = extractQueryTerms(query)
   if (mode === EndpointState.MCP_REMOTE) {
     const args = { query, minimal_output: true }
     if (sort !== 'best') { args.sort = sort; args.order = 'desc' }
@@ -194,79 +253,109 @@ export async function searchRepos(query, sort = 'stars', limit = 30) {
   const q = encodeURIComponent(query)
   const s = sort === 'best' ? '' : `&sort=${sort}&order=desc`
   const d = await restFetch(`/search/repositories?q=${q}&per_page=${limit}${s}`, token)
-  return (d.items || []).map((it) => repoRow(it, queryTerms))
+  return (d?.items || []).map((it) => repoRow(it, queryTerms))
 }
 
-/** 读仓库树。远程 MCP 端点只有 46 个工具（无 get_repository_tree），
- *  用 get_file_contents 读根目录（含 type 列），一层够挑文件用；
- *  深层树降级 REST trees API（匿名可用）。 */
-export async function getTree(owner, repo, ref = 'HEAD') {
+/** 读仓库树。优先 REST 递归树（1 次请求拿全树，可能被 GitHub 截断）；
+ *  HEAD 不被接受时退回「元数据 + 树」两步；带 token 时 MCP 根目录仅作兜底。
+ *  返回的数组带 .truncated / .requests 两个附加属性（供预算与诚实展示）。 */
+export async function getTree(owner, repo) {
   const { mode, token } = selectEndpoint()
-  // T2 教训：MCP path:"." 只返回根目录一层——monorepo 子包清单（apps/web/package.json）
-  // 和深层入口文件全看不见。有 token 时优先走 REST 递归树（一次请求拿全树），
-  // MCP 根目录列举仅作无 token 兜底。
-  if (token) {
-    try {
-      const meta = await restFetch(`/repos/${owner}/${repo}`, token)
-      const sha = meta.commit?.sha || meta.default_branch
-      const d = await restFetch(`/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`, token)
-      const tree = (d.tree || []).map((e) => ({ path: e.path, type: e.type }))
-      if (tree.length > 0) return tree
-    } catch {
-      // REST 树失败（私有仓/限流/网络）——落到 MCP 或匿名重试
+  let lastErr = null
+
+  // 1) 单请求递归树：/git/trees/{tree_sha} 接受分支名/HEAD
+  try {
+    const d = await restFetch(`/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, token)
+    const tree = (d?.tree || []).map((e) => ({ path: e.path, type: e.type }))
+    if (tree.length > 0) {
+      tree.truncated = d?.truncated === true
+      tree.requests = 1
+      return tree
     }
+    lastErr = new Error('空仓库：没有可读文件')
+  } catch (e) {
+    lastErr = e
+    if (e.rateLimited) throw e
   }
+
+  // 2) 两步兜底：先取默认分支，再取树（HEAD 解析失败/默认分支不是 HEAD 的场景）
+  try {
+    const meta = await restFetch(`/repos/${owner}/${repo}`, token)
+    const ref = meta?.default_branch || meta?.commit?.sha
+    if (ref) {
+      const d = await restFetch(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`, token)
+      const tree = (d?.tree || []).map((e) => ({ path: e.path, type: e.type }))
+      if (tree.length > 0) {
+        tree.truncated = d?.truncated === true
+        tree.requests = 2
+        return tree
+      }
+    }
+    lastErr = new Error('仓库为空或默认分支没有文件')
+  } catch (e) {
+    lastErr = e
+    if (e.rateLimited) throw e
+  }
+
+  // 3) MCP 根目录兜底（只一层；仅在 token 模式且 REST 树不可用时）
   if (mode === EndpointState.MCP_REMOTE) {
     try {
       const out = await mcpTool('get_file_contents', { owner, repo, path: '.' }, token)
       if (Array.isArray(out) && out.length > 0 && out[0]?.path !== undefined) {
-        return out.map((e) => ({ path: e.path, type: e.type }))
+        const tree = out.map((e) => ({ path: e.path, type: e.type }))
+        tree.truncated = false
+        tree.requests = 1
+        return tree
       }
     } catch {
-      // 工具缺失/调用失败 —— 降级 REST
+      // 工具缺失/调用失败 —— 保留 lastErr
     }
   }
-  // REST 匿名兜底：默认分支 HEAD 的 sha → 递归树
-  const meta = await restFetch(`/repos/${owner}/${repo}`, token)
-  const sha = meta.commit?.sha || meta.default_branch
-  const d = await restFetch(`/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`, token)
-  return (d.tree || []).map((e) => ({ path: e.path, type: e.type }))
+  throw lastErr || new Error(`读不到 ${owner}/${repo} 的目录树`)
 }
 
-/** 读单个文件内容（窗口由上层裁剪）。
- *  远程 MCP 不接受 ref:"HEAD"（要具体分支名），不传 ref 走默认分支。 */
+/** contents API 路径。ref 缺省/HEAD 时不要拼 `?ref=undefined`——那会让
+ *  GitHub 直接返 500（旧实现匿名深读必挂的根因）。 */
+export function contentsPath(owner, repo, path, ref) {
+  const suffix = ref && ref !== 'HEAD' ? `?ref=${encodeURIComponent(ref)}` : ''
+  const encoded = String(path).split('/').map(encodeURIComponent).join('/')
+  return `/repos/${owner}/${repo}/contents/${encoded}${suffix}`
+}
+
+/** 读单个文件内容（窗口由上层裁剪）。REST JSON 形态优先：
+ *  不再请求 raw media type——那会让 res.json() 抛 SyntaxError。 */
 export async function getFile(owner, repo, path, ref) {
   const { mode, token } = selectEndpoint()
-  if (mode === EndpointState.MCP_REMOTE) {
-    const args = { owner, repo, path }
-    if (ref && ref !== 'HEAD') args.ref = ref
-    const out = await mcpTool('get_file_contents', args, token)
-    // mcpTool 已解到 resource.text（字符串）或目录数组
-    if (typeof out === 'string') return { text: out, ok: true, truncated: false }
-    if (out && typeof out === 'object' && out.content) {
-      const text = out.encoding === 'base64' ? Buffer.from(out.content, 'base64').toString('utf8') : String(out.content)
-      return { text, ok: true, truncated: false }
+  try {
+    const d = await restFetch(contentsPath(owner, repo, path, ref), token)
+    if (typeof d === 'string') return { text: d, ok: true, truncated: false }
+    if (!d || typeof d !== 'object') throw new Error(`文件 ${path} 内容为空`)
+    if (typeof d.content !== 'string') {
+      throw new Error(`文件 ${path} 没有内联内容（可能是子模块或超过 1MB）`)
     }
-    return { text: JSON.stringify(out).slice(0, 2000), ok: true, truncated: false }
+    const text = d.encoding === 'base64' ? Buffer.from(d.content, 'base64').toString('utf8') : d.content
+    return { text, ok: true, truncated: d.truncated === true }
+  } catch (e) {
+    if (mode !== EndpointState.MCP_REMOTE || e.rateLimited) throw e
   }
-  const d = await restFetch(`/repos/${owner}/${repo}/contents/${path}?ref=${ref}`, token, 'application/vnd.github.raw+json')
-  if (typeof d === 'string') return { text: d, ok: true, truncated: false }
-  // JSON（对象）形态
-  const text = d.content ? (d.encoding === 'base64' ? Buffer.from(d.content, 'base64').toString('utf8') : d.content) : ''
-  return { text, ok: true, truncated: false }
+
+  // REST 失败且配置了 token：用 MCP get_file_contents 兜底
+  const args = { owner, repo, path }
+  if (ref && ref !== 'HEAD') args.ref = ref
+  const out = await mcpTool('get_file_contents', args, token)
+  if (typeof out === 'string') return { text: out, ok: true, truncated: false }
+  if (out && typeof out === 'object' && typeof out.content === 'string') {
+    const text = out.encoding === 'base64' ? Buffer.from(out.content, 'base64').toString('utf8') : out.content
+    return { text, ok: true, truncated: false }
+  }
+  return { text: JSON.stringify(out).slice(0, 2000), ok: true, truncated: false }
 }
 
 /** 锚点反查：拿参照仓库的元数据（topics/description/language/license），
  *  供查询规划器提取 topic: 种子。1 次请求。 */
 export async function getRepoMeta(owner, repo) {
-  const { mode, token } = selectEndpoint()
-  let d
-  if (mode === EndpointState.MCP_REMOTE) {
-    // 远程 MCP 没有单一 get_repository 工具，用 REST 更直接（同 token）
-    d = await restFetch(`/repos/${owner}/${repo}`, token)
-  } else {
-    d = await restFetch(`/repos/${owner}/${repo}`, token)
-  }
+  const { token } = selectEndpoint()
+  const d = await restFetch(`/repos/${owner}/${repo}`, token)
   return {
     full_name: d.full_name,
     description: d.description || '',

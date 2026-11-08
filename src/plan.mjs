@@ -9,7 +9,8 @@
 //           够到 star 排序永远看不见的小项目
 //
 // 约束：匿名模式 3 次搜索/想法（10/分钟/IP）；带 token 也是 3 次（30/分钟），
-//       省下的配额留给深读。MAX_TERMS=6 是防呆护栏（每多一词 = 一次 AND 收缩）。
+//       省下的配额留给深读。查询词数由 significantTerms 的停用词/长度过滤决定
+//       （每多一词 = 一次 AND 收缩）。
 
 export const STOPWORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'for', 'with', 'without', 'to', 'of', 'in', 'on', 'at',

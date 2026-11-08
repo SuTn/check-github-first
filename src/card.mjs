@@ -3,8 +3,11 @@
 // 诚实性设计（借鉴 dsh-find-ideas 的分区原则）：
 //   【代码计算区】预排序分 = log10 加权的 star 信号，纯代码算，LLM 不可指定
 //   【数据区】来自 GitHub API 的原始元数据
-//   待 LLM 打 relevance 后，最终排序 = relevance × (1 + log10(max(star,10)+1)) / 2
-//   —— 原型阶段卡片只做预排序，最终公式在 SKILL.md 里教给 agent 执行
+//   relevance（"这个项目有多贴题"）需要世界知识，由 agent 打分；最终排序公式
+//   relevance × (1 + log10(max(star,10)+1)) / 2 写在 SKILL.md 里，由 agent 按
+//   公式自行计算——CLI 不假装自己做了这件事。
+//
+// 2026-11-08 修复：renderPool 不再接受未使用的 rows 参数（旧签名留了个死参数）。
 
 const MAX_DESC = 60
 
@@ -28,15 +31,15 @@ export function preScore(row) {
 
 /**
  * 渲染候选池卡片。
- * rows: 统一 repo 行；queries: 已执行的查询计划；meta: 端点/配额信息。
+ * queries: [{ step: {role, query, sort}, rows, error }]；meta: 端点/检索词。
  *
  * 展示策略（通道多样性配额）：实测（10 用例子代理测试 2026-11-07）预排序的
  * star 偏置会把 precise/tail 通道召回的垂直项目全部挤出纯排序 top30——
  * 用例 3（小程序商城）/4（RSS）/7（MCP×智能家居）top10 里 precise 贡献 0 行。
- * 解法：主区按预排序取 top20，另给 precise-only / tail-only 各 5 个专属席位
- * （席位内仍按预排序），保证每个通道的工作成果对读者可见。
+ * 解法：主区按预排序取 top20，另给 anchor 3 / precise-only 5 / tail-only 5 个
+ * 专属席位（席位内仍按预排序），保证每个通道的工作成果对读者可见。
  */
-export function renderPool(rows, queries, meta = {}) {
+export function renderPool(queries, meta = {}) {
   const lines = []
   const uniq = new Map()
   for (const q of queries) {
@@ -67,7 +70,8 @@ export function renderPool(rows, queries, meta = {}) {
   tailOnly.forEach((r) => shown.add(r.full_name))
 
   lines.push('🎯 开发前探查 —— 候选池卡片')
-  lines.push(`   端点: ${meta.endpoint || '?'}   检索词: ${(meta.terms || []).join(', ')}`)
+  lines.push(`   端点: ${meta.endpoint || '?'}`)
+  lines.push(`   检索词: ${(meta.terms || []).join(', ') || '（无）'}`)
   lines.push('')
   lines.push('【查询计划】')
   for (const q of queries) {
@@ -77,7 +81,7 @@ export function renderPool(rows, queries, meta = {}) {
   }
   lines.push(`  合并去重: ${pool.length} 个候选；展示 ${mainRows.length + anchorSeat.length + preciseOnly.length + tailOnly.length} 个（主区 20 按预排序 + anchor 保底 ${anchorSeat.length} + precise 专属 ${preciseOnly.length} + tail 专属 ${tailOnly.length}——防 star 偏置淹没垂直项目）`)
   lines.push('')
-  lines.push('【代码计算区】预排序 = star权重(1+log10) × 新鲜度 × 词位加权(topics命中1.35/name 1.2/仅desc 1.0/无 0.75)；最终排序等 relevance 打分后由公式计算')
+  lines.push('【代码计算区】预排序 = star权重(1+log10) × 新鲜度 × 词位加权(topics命中1.35/name 1.2/仅desc 1.0/无 0.75)；relevance 由 agent 打分，最终排序按 SKILL.md 公式计算')
   lines.push('')
   lines.push('| # | 项目 | star | 最近推送 | 语言 | 预排 | 命中通道 | 简介 |')
   lines.push('|---|------|------|----------|------|------|----------|------|')
@@ -88,7 +92,7 @@ export function renderPool(rows, queries, meta = {}) {
     const seat = i > mainRows.length + anchorSeat.length + preciseOnly.length ? ' [tail席]' :
       i > mainRows.length + anchorSeat.length ? ' [precise席]' :
       i > mainRows.length ? ' [anchor席]' : ''
-    lines.push(`| ${i} | ${r.full_name} | ${fmtStars(r.stars)} | ${r.pushed_at.slice(0, 10)} | ${r.language} | ${preScore(r).toFixed(2)} | ${r.hitBy.join('+')}${seat} | ${d} |`)
+    lines.push(`| ${i} | ${r.full_name} | ${fmtStars(r.stars)} | ${(r.pushed_at || '').slice(0, 10)} | ${r.language} | ${preScore(r).toFixed(2)} | ${r.hitBy.join('+')}${seat} | ${d} |`)
   }
   lines.push('')
   lines.push('【边界说明】')

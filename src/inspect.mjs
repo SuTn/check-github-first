@@ -1,8 +1,9 @@
 // inspect.mjs — 深读：选中的仓库 → 借鉴卡
 //
-// 阅读策略（每仓库 ≤4 次请求：树 + 3 文件；树走 REST recursive 时含 meta 共 2）：
-//   1. 递归树 → 挑文件（manifest > monorepo 子包 manifest > 入口 > README）
+// 阅读策略（每仓库 ≤4 次请求：树 + 最多 2 个文件 + monorepo 可选补读 1）：
+//   1. 递归树 → 挑文件（manifest > 入口 > README）
 //   2. 读 manifest（依赖=技术栈）+ 入口或 README（结构=架构）
+//   3. 根 manifest 信息薄时，补读 monorepo 子包 manifest（+1）
 // 借鉴卡输出：技术栈 / 架构信号 / 关键文件（带链接）/ 请求数
 //
 // T2 测试教训（第三轮）：
@@ -10,21 +11,39 @@
 //     apps/*/package.json 或 packages/*/package.json 子包清单
 //   - README 前 15 行常是赞助商/徽标区——跳过品牌区取首段正文
 //   - stderr 无逐请求日志，预算纪律（≤N 请求）不可审计——加日志
+//
+// 2026-11-08 修复：
+//   - MANIFESTS 匹配改为大小写不敏感（旧版 Cargo.toml / Gemfile 永远选不中）
+//   - 预算按真实 HTTP 次数计（树若走两步兜底算 2）
+//   - 树被 GitHub 截断（truncated:true）时如实标注
 
 import { getTree, getFile } from './transport.mjs'
 
-const MANIFESTS = ['package.json', 'go.mod', 'cargo.toml', 'pyproject.toml', 'requirements.txt', 'pom.xml', 'composer.json', 'gemfile', 'mix.exs', 'pubspec.yaml']
+export const MANIFESTS = [
+  'package.json', 'go.mod', 'cargo.toml', 'pyproject.toml', 'requirements.txt',
+  'pom.xml', 'composer.json', 'gemfile', 'mix.exs', 'pubspec.yaml',
+]
 const ENTRY_RE = /(^|\/)(main|index|app|server|entry|cli)\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php)$/i
 
-/** 从树里挑值得读的文件（≤3）：
+/** 从树里挑值得读的文件（≤2）：
  *  1. 根 manifest（技术栈）
- *  2. monorepo 子包 manifest（若根 manifest 信息薄——由调用方判断）
- *  3. 入口文件 或 README */
+ *  2. 入口文件 或 README */
 export function pickFiles(tree) {
   const paths = tree.map((e) => e.path)
-  const manifest = MANIFESTS.map((m) => paths.find((p) => p === m || p.endsWith('/' + m))).find(Boolean)
-  const entry = paths.find((p) => ENTRY_RE.test(p) && !p.includes('test') && !p.includes('node_modules'))
+  const lower = paths.map((p) => p.toLowerCase())
+
+  // manifest：按 MANIFESTS 顺序优先，文件名/路径比较一律小写
+  const manifest = MANIFESTS.map((m) => {
+    const idx = lower.findIndex((lp) => lp === m || lp.endsWith('/' + m))
+    return idx >= 0 ? paths[idx] : null
+  }).find(Boolean)
+
+  const entry = paths.find((p) => {
+    const lp = p.toLowerCase()
+    return ENTRY_RE.test(p) && !lp.includes('test') && !lp.includes('node_modules')
+  })
   const readme = paths.find((p) => /^readme(\.md|\.txt)?$/i.test(p))
+
   const files = []
   if (manifest) files.push({ path: manifest, why: 'manifest（技术栈与依赖）' })
   if (files.length < 2 && entry) files.push({ path: entry, why: '入口文件（架构与模块组织）' })
@@ -35,7 +54,7 @@ export function pickFiles(tree) {
 /** monorepo 嗅探：根 package.json 信息薄时，找最有信息量的子包清单。
  *  优先 apps 下 web、frontend、server 等常见命名，其次任意子包清单。 */
 export function pickMonorepoManifest(tree) {
-  const pkgPaths = tree.map((e) => e.path).filter((p) => /^(apps|packages)\/[^/]+\/package\.json$/.test(p))
+  const pkgPaths = tree.map((e) => e.path).filter((p) => /^(apps|packages)\/[^/]+\/package\.json$/i.test(p))
   if (pkgPaths.length === 0) return null
   const prefer = ['web', 'frontend', 'client', 'server', 'api', 'app', 'desktop', 'mobile']
   for (const k of prefer) {
@@ -103,21 +122,24 @@ function readmeDigest(text) {
 }
 
 /**
- * 深读一个仓库，返回借鉴卡片段。
- * 预算：树 1（REST 含 meta 2）+ ≤3 文件 ≈ 4-5 请求/仓库。
+ * 深读一个仓库。返回 { ok, text }：
+ *   ok=false 表示这个仓库整体深读失败（scout 据此决定退出码）。
+ * 预算：树 ≤2 + ≤2 文件，monorepo 补读占剩余预算，总计 ≤4 次。
  */
-export async function inspectRepo(fullName, budget = 5) {
-  const [owner, repo] = fullName.split('/')
+export async function inspectRepo(fullName, budget = 4) {
+  const [owner, repo] = String(fullName || '').split('/')
   const lines = []
   let used = 0
   const log = (m) => process.stderr.write(`   [inspect ${used}] ${m}\n`)
   try {
+    if (!owner || !repo) throw new Error('需要 owner/repo 形式')
     const tree = await getTree(owner, repo)
-    used += 1
-    log(`树 ${tree.length} 项`)
+    used += tree.requests ?? 1
+    const truncated = tree.truncated === true
+    log(`树 ${tree.length} 项${truncated ? '（GitHub 返回截断）' : ''}`)
     const files = pickFiles(tree)
     lines.push(`### ${fullName}`)
-    lines.push(`   目录规模: ${tree.length} 项${tree.__truncated ? '（树被截断）' : ''}`)
+    lines.push(`   目录规模: ${tree.length} 项${truncated ? '（GitHub 返回截断：只看到部分文件）' : ''}`)
 
     // 根 manifest 读了之后若技术栈信息薄（只有 pkg:name），补读 monorepo 子包清单
     let rootStackThin = false
@@ -127,11 +149,11 @@ export async function inspectRepo(fullName, budget = 5) {
         const { text } = await getFile(owner, repo, f.path)
         used += 1
         log(`读 ${f.path}`)
-        const isManifest = MANIFESTS.some((m) => f.path.endsWith(m))
+        const isManifest = MANIFESTS.some((m) => f.path.toLowerCase().endsWith(m))
         if (isManifest) {
           const stack = stackOf(f.path, text.slice(0, 20000))
           lines.push(`   技术栈（${f.path}）: ${stack.join(', ') || '无显著依赖'}`)
-          if (f.path.endsWith('package.json')) {
+          if (f.path.toLowerCase().endsWith('package.json')) {
             const hasFramework = stack.some((s) => !s.startsWith('pkg:'))
             rootStackThin = !hasFramework
           }
@@ -161,9 +183,10 @@ export async function inspectRepo(fullName, budget = 5) {
     }
     if (files.length === 0) lines.push('   （树里没找到 manifest/入口——可能是空仓库或非常规布局）')
     lines.push(`   请求预算: 用了 ${used}/${budget}`)
+    return { ok: true, text: lines.join('\n') }
   } catch (e) {
     lines.push(`### ${fullName}`)
     lines.push(`   ⚠️ 深读失败: ${e.message}`)
+    return { ok: false, text: lines.join('\n') }
   }
-  return lines.join('\n')
 }

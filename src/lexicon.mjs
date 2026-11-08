@@ -25,7 +25,6 @@ export const LEXICON = {
   '记账': 'personal finance',
   '记账应用': 'personal finance',
   '阅读器': 'reader',
-  ' rss': 'rss',
   'rss阅读器': 'rss reader',
   '终端': 'terminal',
   '终端模拟器': 'terminal emulator',
