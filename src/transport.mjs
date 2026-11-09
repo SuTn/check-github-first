@@ -14,7 +14,7 @@
 //   getRepoMeta(owner, repo)        -> {full_name, description, topics, ...}
 
 import { readFileSync } from 'node:fs'
-import { netFetch, selectEndpoint, EndpointState } from './net.mjs'
+import { netFetch, selectEndpoint, EndpointState, DEFAULT_TIMEOUT_MS } from './net.mjs'
 
 const MCP_URL = 'https://api.githubcopilot.com/mcp/'
 const API = 'https://api.github.com'
@@ -125,13 +125,13 @@ function parseJson(text) {
   }
 }
 
-async function restFetch(path, token) {
+async function restFetch(path, token, timeoutMs) {
   const headers = {
     'User-Agent': UA,
     'Accept': 'application/vnd.github+json',
   }
   if (token) headers['Authorization'] = `Bearer ${token}`
-  const res = await netFetch(`${API}${path}`, { headers })
+  const res = await netFetch(`${API}${path}`, { headers, timeoutMs })
   const text = await res.text()
 
   if (res.status === 403 || res.status === 429) {
@@ -262,10 +262,13 @@ export async function searchRepos(query, sort = 'stars', limit = 30) {
 export async function getTree(owner, repo) {
   const { mode, token } = selectEndpoint()
   let lastErr = null
+  // 大仓库（nodejs/node 全树 19MB）的树请求单独放宽超时：取 90s 与全局默认的较大者
+  //（CGF_TIMEOUT_MS 设得更大时仍然生效），其余请求仍用全局默认
+  const TREE_TIMEOUT_MS = Math.max(90000, DEFAULT_TIMEOUT_MS)
 
   // 1) 单请求递归树：/git/trees/{tree_sha} 接受分支名/HEAD
   try {
-    const d = await restFetch(`/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, token)
+    const d = await restFetch(`/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, token, TREE_TIMEOUT_MS)
     const tree = (d?.tree || []).map((e) => ({ path: e.path, type: e.type }))
     if (tree.length > 0) {
       tree.truncated = d?.truncated === true
@@ -283,7 +286,7 @@ export async function getTree(owner, repo) {
     const meta = await restFetch(`/repos/${owner}/${repo}`, token)
     const ref = meta?.default_branch || meta?.commit?.sha
     if (ref) {
-      const d = await restFetch(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`, token)
+      const d = await restFetch(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`, token, TREE_TIMEOUT_MS)
       const tree = (d?.tree || []).map((e) => ({ path: e.path, type: e.type }))
       if (tree.length > 0) {
         tree.truncated = d?.truncated === true
@@ -297,13 +300,17 @@ export async function getTree(owner, repo) {
     if (e.rateLimited) throw e
   }
 
-  // 3) MCP 根目录兜底（只一层；仅在 token 模式且 REST 树不可用时）
+  // 3) MCP 根目录兜底（只一层；仅在 token 模式且 REST 树不可用时）。
+  // 诚实性：这一层不等于完整树——必须标记 truncated，让上层如实告知
+  //「只看到根目录」，而不是冒充全树（2026-11-09：nodejs/node 19MB 树
+  // 在默认 30s 超时下超时，兜底返回的 51 项曾被当成完整树展示）。
   if (mode === EndpointState.MCP_REMOTE) {
     try {
       const out = await mcpTool('get_file_contents', { owner, repo, path: '.' }, token)
       if (Array.isArray(out) && out.length > 0 && out[0]?.path !== undefined) {
         const tree = out.map((e) => ({ path: e.path, type: e.type }))
-        tree.truncated = false
+        tree.truncated = true
+        tree.rootOnly = true
         tree.requests = 1
         return tree
       }

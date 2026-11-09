@@ -24,24 +24,49 @@ export const MANIFESTS = [
   'pom.xml', 'composer.json', 'gemfile', 'mix.exs', 'pubspec.yaml',
 ]
 const ENTRY_RE = /(^|\/)(main|index|app|server|entry|cli)\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php)$/i
+/** vendor/外围目录里的 manifest 与入口代表的是依赖项/fixture，不是本项目技术栈。
+ *  2026-11-09：nodejs/node 全树 355 个 package.json 里 201 个在 deps/ 下，
+ *  还有 test/addons/esm/node_modules/... 的嵌套 fixture——旧版 findIndex
+ *  沿 DFS 树序首个命中。段级判断：路径中任一目录段命中词表即排除。 */
+const VENDOR_SEGMENTS = new Set([
+  'deps', 'vendor', 'third_party', 'thirdparty', 'node_modules',
+  'benchmark', 'benchmarks', 'examples', 'example', 'fixtures',
+  'test', 'tests', 'docs', 'doc', 'tools',
+])
+function inVendorDir(p) {
+  const segs = p.toLowerCase().split('/')
+  segs.pop() // 文件名段不参与
+  return segs.some((s) => VENDOR_SEGMENTS.has(s))
+}
+
+/** manifest 选择：先根级（任意类型），再非 vendor 嵌套（按 MANIFESTS 类型顺序）。
+ *  两遍而非一遍：nodejs/node 的根 pyproject.toml 必须赢过 tools/clang-format/
+ *  package.json（lint 包装器的清单，对主项目技术栈零信息量）——
+ *  「根级」是比「类型偏好」更强的信号。 */
+function pickManifest(lower, paths) {
+  for (const m of MANIFESTS) {
+    const i = lower.findIndex((lp) => lp === m)
+    if (i >= 0) return paths[i]
+  }
+  for (const m of MANIFESTS) {
+    const i = lower.findIndex((lp) => lp.endsWith('/' + m) && !inVendorDir(lp))
+    if (i >= 0) return paths[i]
+  }
+  return null
+}
 
 /** 从树里挑值得读的文件（≤2）：
- *  1. 根 manifest（技术栈）
- *  2. 入口文件 或 README */
+ *  1. 根 manifest（技术栈）；根没有时找非 vendor 子目录里的 manifest
+ *  2. 入口文件（浅层优先——越接近根越可能是主入口）或 README */
 export function pickFiles(tree) {
   const paths = tree.map((e) => e.path)
   const lower = paths.map((p) => p.toLowerCase())
 
-  // manifest：按 MANIFESTS 顺序优先，文件名/路径比较一律小写
-  const manifest = MANIFESTS.map((m) => {
-    const idx = lower.findIndex((lp) => lp === m || lp.endsWith('/' + m))
-    return idx >= 0 ? paths[idx] : null
-  }).find(Boolean)
+  const manifest = pickManifest(lower, paths)
 
-  const entry = paths.find((p) => {
-    const lp = p.toLowerCase()
-    return ENTRY_RE.test(p) && !lp.includes('test') && !lp.includes('node_modules')
-  })
+  const entryCandidates = paths.filter((p) => ENTRY_RE.test(p) && !inVendorDir(p))
+  entryCandidates.sort((a, b) => a.split('/').length - b.split('/').length)
+  const entry = entryCandidates[0]
   const readme = paths.find((p) => /^readme(\.md|\.txt)?$/i.test(p))
 
   const files = []
@@ -126,27 +151,37 @@ function readmeDigest(text) {
  *   ok=false 表示这个仓库整体深读失败（scout 据此决定退出码）。
  * 预算：树 ≤2 + ≤2 文件，monorepo 补读占剩余预算，总计 ≤4 次。
  */
-export async function inspectRepo(fullName, budget = 4) {
+/** 树完整性标注：三种诚实文案，绝不冒充全树。 */
+export function treeScopeNote(tree) {
+  if (!tree || tree.truncated !== true) return ''
+  if (tree.rootOnly === true) return '（仅根目录一层：REST 递归树超时/不可用，MCP 兜底只列了根）'
+  return '（GitHub 返回截断：只看到部分文件）'
+}
+
+/** dep 注入缝（单测用）：覆盖 getTree/getFile 的网络行为，测渲染路径。 */
+export async function inspectRepo(fullName, budget = 4, dep = {}) {
+  const getTreeFn = dep.getTree || getTree
+  const getFileFn = dep.getFile || getFile
   const [owner, repo] = String(fullName || '').split('/')
   const lines = []
   let used = 0
   const log = (m) => process.stderr.write(`   [inspect ${used}] ${m}\n`)
   try {
     if (!owner || !repo) throw new Error('需要 owner/repo 形式')
-    const tree = await getTree(owner, repo)
+    const tree = await getTreeFn(owner, repo)
     used += tree.requests ?? 1
-    const truncated = tree.truncated === true
-    log(`树 ${tree.length} 项${truncated ? '（GitHub 返回截断）' : ''}`)
+    const scopeNote = treeScopeNote(tree)
+    log(`树 ${tree.length} 项${scopeNote}`)
     const files = pickFiles(tree)
     lines.push(`### ${fullName}`)
-    lines.push(`   目录规模: ${tree.length} 项${truncated ? '（GitHub 返回截断：只看到部分文件）' : ''}`)
+    lines.push(`   目录规模: ${tree.length} 项${scopeNote}`)
 
     // 根 manifest 读了之后若技术栈信息薄（只有 pkg:name），补读 monorepo 子包清单
     let rootStackThin = false
     for (const f of files) {
       if (used >= budget) break
       try {
-        const { text } = await getFile(owner, repo, f.path)
+        const { text } = await getFileFn(owner, repo, f.path)
         used += 1
         log(`读 ${f.path}`)
         const isManifest = MANIFESTS.some((m) => f.path.toLowerCase().endsWith(m))
@@ -170,7 +205,7 @@ export async function inspectRepo(fullName, budget = 4) {
       const sub = pickMonorepoManifest(tree)
       if (sub && sub !== files[0]?.path) {
         try {
-          const { text } = await getFile(owner, repo, sub)
+          const { text } = await getFileFn(owner, repo, sub)
           used += 1
           log(`monorepo 子包 ${sub}`)
           const stack = stackOf(sub, text.slice(0, 20000))

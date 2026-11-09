@@ -107,7 +107,7 @@ export function resetProxyCache() {
   probed = false
 }
 
-const DEFAULT_TIMEOUT_MS = (() => {
+export const DEFAULT_TIMEOUT_MS = (() => {
   const n = Number(process.env.CGF_TIMEOUT_MS)
   return Number.isFinite(n) && n > 0 ? n : 30000
 })()
