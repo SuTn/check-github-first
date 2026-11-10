@@ -3,3 +3,6 @@ node_modules/
 *.log
 .env
 .DS_Store
+
+# 宣传片渲染工程不入库 (成片在 docs/promo/demo.mp4, README 顶部引用; 工程源码留在本地)
+/promo/

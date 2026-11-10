@@ -9,6 +9,12 @@
 
 [中文](#中文文档) · [English](#english)
 
+## Demo · 43 秒看懂它是干嘛的
+
+<video src="docs/promo/demo.mp4" controls muted autoplay loop playsinline width="100%"></video>
+
+*(命令真实输出、77→33 候选筛选、immich 118.6k★ 同类第一 —— 片中所有数字均为实测数据)*
+
 ---
 
 ## 中文文档
